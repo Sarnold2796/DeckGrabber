@@ -337,6 +337,7 @@ def main():
             "mana_cost": None,
             "cmc": None,
             "type_line": None,
+            "creature_types": [],
             "oracle_text": None,
             "power": None,
             "toughness": None,
@@ -344,11 +345,22 @@ def main():
         }
 
         if isinstance(card_data, dict) and "error" not in card_data:
+            creature_types = card_data.get("subtypes") or []
+            if not creature_types and isinstance(card_data.get("type_line"), str):
+                type_line = card_data["type_line"]
+                if "Creature" in type_line and "—" in type_line:
+                    creature_types = [
+                        part.strip()
+                        for part in type_line.split("—", 1)[1].split()
+                        if part.strip()
+                    ]
+
             card_entry_output.update(
                 {
                     "mana_cost": card_data.get("mana_cost"),
                     "cmc": card_data.get("cmc"),
                     "type_line": card_data.get("type_line"),
+                    "creature_types": creature_types,
                     "oracle_text": card_data.get("oracle_text"),
                     "power": card_data.get("power"),
                     "toughness": card_data.get("toughness"),
