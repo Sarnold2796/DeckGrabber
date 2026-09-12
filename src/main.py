@@ -1,10 +1,13 @@
 from datetime import datetime, timezone
+from html import unescape
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 import json
 import os
+import re
+import sys
 import time
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -13,6 +16,8 @@ OUTPUT_FILE = ROOT / "output" / "formatted_deck.json"
 LOG_DIR = ROOT / "logs"
 LOG_FILE = LOG_DIR / "debug_log.jsonl"
 SCRYFALL_API_BASE_URL = os.environ.get("SCRYFALL_API_BASE_URL", "https://api.scryfall.com")
+ARCHIDEKT_API_BASE_URL = "https://archidekt.com/api/decks"
+ARCHIDEKT_DECK_URL = os.environ.get("ARCHIDEKT_DECK_URL")
 
 
 def write_debug_log(event, **details):
@@ -98,6 +103,97 @@ def fetch_card_by_name(card_name):
         raise
 
 
+def extract_archidekt_deck_id(source):
+    if not source:
+        return None
+
+    stripped = source.strip()
+
+    if stripped.isdigit():
+        return stripped
+
+    match = re.search(r"archidekt\.com(?:/api/decks)?/decks/(\d+)", stripped)
+    if match:
+        return match.group(1)
+
+    match = re.search(r"archidekt\.com/api/decks/(\d+)", stripped)
+    if match:
+        return match.group(1)
+
+    return None
+
+
+def fetch_archidekt_deck(deck_id_or_url):
+    deck_id = extract_archidekt_deck_id(deck_id_or_url)
+    if not deck_id:
+        raise ValueError(
+            "Unable to determine an Archidekt deck ID from the provided source. "
+            "Use a deck URL or numeric deck ID."
+        )
+
+    page_url = deck_id_or_url
+    if not page_url.startswith("http://") and not page_url.startswith("https://"):
+        page_url = f"https://archidekt.com/decks/{deck_id}/crimes"
+    elif "/decks/" not in page_url:
+        page_url = f"https://archidekt.com/decks/{deck_id}/crimes"
+
+    request = Request(
+        page_url,
+        headers={
+            "User-Agent": "ScryfallGrab/1.0",
+            "Accept": "text/html,application/xhtml+xml",
+        },
+        method="GET",
+    )
+
+    with urlopen(request, timeout=30) as response:
+        raw_html = response.read().decode("utf-8", errors="ignore")
+
+    match = re.search(
+        r'<script id="__NEXT_DATA__" type="application/json">(.*)</script>',
+        raw_html,
+        re.S,
+    )
+    if not match:
+        raise ValueError(
+            f"Archidekt deck {deck_id} did not include the expected embedded JSON payload."
+        )
+
+    try:
+        payload = json.loads(match.group(1))
+    except json.JSONDecodeError as error:
+        raise ValueError(
+            f"Archidekt deck {deck_id} returned malformed embedded JSON: {error}"
+        ) from error
+
+    deck = payload.get("props", {}).get("pageProps", {}).get("redux", {}).get("deck", {})
+    card_map = deck.get("cardMap") or {}
+    excluded_categories = {"Maybeboard", "Sideboard"}
+
+    deck_cards = []
+    for card_entry in card_map.values():
+        if not isinstance(card_entry, dict):
+            continue
+
+        categories = set(card_entry.get("categories") or [])
+        if categories.intersection(excluded_categories):
+            continue
+
+        card_name = (card_entry.get("name") or "").strip()
+        if not card_name:
+            continue
+
+        quantity = int(card_entry.get("qty") or card_entry.get("quantity") or 1)
+        deck_cards.append({"count": quantity, "name": card_name})
+
+    if not deck_cards:
+        raise ValueError(
+            f"Archidekt deck {deck_id} did not return any usable mainboard/commander cards."
+        )
+
+    return deck_cards
+
+
 def parse_deck(file_path):
     cards = []
 
@@ -116,6 +212,17 @@ def parse_deck(file_path):
         cards.append({"count": count, "name": name})
 
     return cards
+
+
+def load_deck_cards():
+    if ARCHIDEKT_DECK_URL:
+        return fetch_archidekt_deck(ARCHIDEKT_DECK_URL)
+
+    content = DECK_FILE.read_text(encoding="utf-8").strip()
+    if content and extract_archidekt_deck_id(content):
+        return fetch_archidekt_deck(content)
+
+    return parse_deck(DECK_FILE)
 
 
 def fetch_collection_cards(deck_cards):
@@ -177,14 +284,26 @@ def fetch_collection_cards(deck_cards):
         not_found = response.get("not_found", [])
         for missing in not_found:
             card_name = missing.get("name") or missing.get("id") or "unknown"
-            card_lookup[card_name] = {
-                "error": f"Card not found in Scryfall collection response: {missing}"
-            }
-            write_debug_log(
-                "card_not_found_in_collection_response",
-                card_name=card_name,
-                missing_record=missing,
-            )
+            try:
+                card_lookup[card_name] = fetch_card_by_name(card_name)
+            except Exception as lookup_error:
+                card_lookup[card_name] = {
+                    "error": f"Unable to fetch card data from Scryfall: {lookup_error}"
+                }
+                write_debug_log(
+                    "fallback_card_lookup_failed",
+                    card_name=card_name,
+                    error_type=type(lookup_error).__name__,
+                    error_message=str(lookup_error),
+                    error_code=getattr(lookup_error, "code", None),
+                    error_reason=getattr(lookup_error, "reason", None),
+                )
+            else:
+                write_debug_log(
+                    "card_not_found_in_collection_response_recovered",
+                    card_name=card_name,
+                    missing_record=missing,
+                )
 
         if start + batch_size < total_cards:
             print("  -> Waiting 0.5 seconds before next collection request")
@@ -194,7 +313,12 @@ def fetch_collection_cards(deck_cards):
 
 
 def main():
-    deck_cards = parse_deck(DECK_FILE)
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+    deck_cards = load_deck_cards()
     formatted_cards = []
 
     print(f"Starting deck processing for {len(deck_cards)} cards from {DECK_FILE.name}")
