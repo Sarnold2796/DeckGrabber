@@ -215,12 +215,15 @@ def parse_deck(file_path):
 
 
 def load_deck_cards():
+    content = DECK_FILE.read_text(encoding="utf-8").strip()
+
+    if content:
+        if extract_archidekt_deck_id(content):
+            return fetch_archidekt_deck(content)
+        return parse_deck(DECK_FILE)
+
     if ARCHIDEKT_DECK_URL:
         return fetch_archidekt_deck(ARCHIDEKT_DECK_URL)
-
-    content = DECK_FILE.read_text(encoding="utf-8").strip()
-    if content and extract_archidekt_deck_id(content):
-        return fetch_archidekt_deck(content)
 
     return parse_deck(DECK_FILE)
 
