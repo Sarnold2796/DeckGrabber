@@ -1,6 +1,22 @@
+# Python cache and local environment
 __pycache__/
+*.py[cod]
+.venv/
+
+# Local project runtime data
 logs/
 data/
 output/
 deck.txt
 formatted_deck.json
+
+# Debug / exploratory artifacts
+archidekt_debug.txt
+candidate_matches.json
+cards_chunk.txt
+card_map_first_entry.json
+pattern1.txt
+pattern2.txt
+pattern3.txt
+pattern_test.json
+__NEXT_DATA___chunk.txt
