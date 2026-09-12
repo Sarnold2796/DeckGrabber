@@ -29,6 +29,8 @@ https://archidekt.com/decks/26337976/dorves
 
 The app will detect the deck ID from the URL and load the public deck page’s embedded JSON payload.
 
+If `data/deck.txt` already contains a deck URL, that local deck source takes precedence over any `ARCHIDEKT_DECK_URL` environment variable. The environment variable is only used as a fallback when the local deck file is empty.
+
 ### 2. Plain deck list
 
 You can also provide a regular deck list in `data/deck.txt`, one card per line:
@@ -79,7 +81,20 @@ The generated JSON file contains a top-level `source_deck` value and a `cards` a
 You can override defaults with environment variables:
 
 - `SCRYFALL_API_BASE_URL` - defaults to `https://api.scryfall.com`
-- `ARCHIDEKT_DECK_URL` - optional direct Archidekt deck URL override
+- `ARCHIDEKT_DECK_URL` - optional direct Archidekt deck URL fallback when `data/deck.txt` is empty
+
+## Local verification
+
+The project includes a small local regression test to verify the loader precedence without depending on remote calls:
+
+```bash
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+```
+
+This confirms:
+
+- a local Archidekt URL in `data/deck.txt` wins over an environment-provided Archidekt URL
+- plain local deck lists still parse correctly
 
 ## Notes
 
