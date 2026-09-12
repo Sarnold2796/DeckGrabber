@@ -3,20 +3,16 @@ __pycache__/
 *.py[cod]
 .venv/
 
-# Local project runtime data
+# Generated runtime artifacts
 logs/
-data/
 output/
-deck.txt
 formatted_deck.json
+deck.txt
 
 # Debug / exploratory artifacts
 archidekt_debug.txt
 candidate_matches.json
 cards_chunk.txt
 card_map_first_entry.json
-pattern1.txt
-pattern2.txt
-pattern3.txt
-pattern_test.json
+pattern*.txt
 __NEXT_DATA___chunk.txt
