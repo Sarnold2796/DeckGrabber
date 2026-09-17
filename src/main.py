@@ -47,7 +47,9 @@ def fetch_json(url, method="GET", data=None):
 
     try:
         with urlopen(request, timeout=30) as response:
-            return json.load(response)
+            payload = json.load(response)
+            print(f"Connection successful: {method} {url} ({response.status})")
+            return payload
     except HTTPError as error:
         last_error = error
         write_debug_log(
@@ -89,7 +91,9 @@ def fetch_card_by_name(card_name):
 
     try:
         with urlopen(request, timeout=30) as response:
-            return json.load(response)
+            card = json.load(response)
+            print(f"Individual connection successful: {card_name}")
+            return card
     except Exception as error:
         write_debug_log(
             "card_lookup_failed",
@@ -131,6 +135,12 @@ def fetch_archidekt_deck(deck_id_or_url):
             "Use a deck URL or numeric deck ID."
         )
 
+    write_debug_log(
+        "archidekt_deck_request_started",
+        deck_id=deck_id,
+        source=deck_id_or_url,
+    )
+
     page_url = deck_id_or_url
     if not page_url.startswith("http://") and not page_url.startswith("https://"):
         page_url = f"https://archidekt.com/decks/{deck_id}/crimes"
@@ -148,6 +158,7 @@ def fetch_archidekt_deck(deck_id_or_url):
 
     with urlopen(request, timeout=30) as response:
         raw_html = response.read().decode("utf-8", errors="ignore")
+    print(f"Connection successful: Archidekt deck {deck_id} ({response.status})")
 
     match = re.search(
         r'<script id="__NEXT_DATA__" type="application/json">(.*)</script>',
@@ -191,6 +202,13 @@ def fetch_archidekt_deck(deck_id_or_url):
             f"Archidekt deck {deck_id} did not return any usable mainboard/commander cards."
         )
 
+    write_debug_log(
+        "archidekt_deck_loaded",
+        deck_id=deck_id,
+        card_entries=len(deck_cards),
+        total_copies=sum(entry["count"] for entry in deck_cards),
+    )
+
     return deck_cards
 
 
@@ -211,6 +229,13 @@ def parse_deck(file_path):
 
         cards.append({"count": count, "name": name})
 
+    write_debug_log(
+        "local_deck_parsed",
+        file=str(file_path),
+        card_entries=len(cards),
+        total_copies=sum(entry["count"] for entry in cards),
+    )
+
     return cards
 
 
@@ -219,12 +244,24 @@ def load_deck_cards():
 
     if content:
         if extract_archidekt_deck_id(content):
+            write_debug_log("deck_source_selected", source="local_archidekt", value=content)
+            print(f"Deck source selected: local Archidekt URL ({content})")
             return fetch_archidekt_deck(content)
+        write_debug_log("deck_source_selected", source="local_file", file=str(DECK_FILE))
+        print(f"Deck source selected: local file ({DECK_FILE})")
         return parse_deck(DECK_FILE)
 
     if ARCHIDEKT_DECK_URL:
+        write_debug_log(
+            "deck_source_selected",
+            source="environment_archidekt",
+            value=ARCHIDEKT_DECK_URL,
+        )
+        print(f"Deck source selected: ARCHIDEKT_DECK_URL ({ARCHIDEKT_DECK_URL})")
         return fetch_archidekt_deck(ARCHIDEKT_DECK_URL)
 
+    write_debug_log("deck_source_selected", source="empty_local_file", file=str(DECK_FILE))
+    print(f"Deck source selected: empty local file ({DECK_FILE})")
     return parse_deck(DECK_FILE)
 
 
@@ -243,12 +280,24 @@ def fetch_collection_cards(deck_cards):
         print(
             f"[Batch {start // batch_size + 1}] Posting {len(batch_names)} identifiers to /cards/collection"
         )
+        print(f"  Cards: {', '.join(batch_names)}")
 
         try:
             response = fetch_json(
                 f"{SCRYFALL_API_BASE_URL}/cards/collection",
                 method="POST",
                 data=json.dumps(payload).encode("utf-8"),
+            )
+            write_debug_log(
+                "batch_request_succeeded",
+                batch_index=start // batch_size + 1,
+                batch_size=len(batch),
+                returned_cards=len(response.get("data", [])),
+                not_found=len(response.get("not_found", [])),
+            )
+            print(
+                f"  -> Batch connection successful: {len(response.get('data', []))} found, "
+                f"{len(response.get('not_found', []))} requiring individual checks"
             )
         except Exception as error:
             write_debug_log(
@@ -264,9 +313,18 @@ def fetch_collection_cards(deck_cards):
             )
             print(f"  -> Batch request failed: {error}")
             print("  -> Falling back to individual card lookups")
-            for entry in batch:
+            write_debug_log(
+                "individual_lookup_fallback_started",
+                batch_index=start // batch_size + 1,
+                card_count=len(batch),
+            )
+            for individual_index, entry in enumerate(batch, start=1):
+                print(
+                    f"  [Individual {individual_index}/{len(batch)}] Checking {entry['name']}"
+                )
                 try:
                     card_lookup[entry["name"]] = fetch_card_by_name(entry["name"])
+                    print(f"    -> Individual check successful: {entry['name']}")
                 except Exception as lookup_error:
                     card_lookup[entry["name"]] = {
                         "error": f"Unable to fetch card data from Scryfall: {lookup_error}"
@@ -279,6 +337,7 @@ def fetch_collection_cards(deck_cards):
                         error_code=getattr(lookup_error, "code", None),
                         error_reason=getattr(lookup_error, "reason", None),
                     )
+                    print(f"    -> Individual check failed: {lookup_error}")
             break
 
         for card in response.get("data", []):
@@ -287,8 +346,10 @@ def fetch_collection_cards(deck_cards):
         not_found = response.get("not_found", [])
         for missing in not_found:
             card_name = missing.get("name") or missing.get("id") or "unknown"
+            print(f"  [Individual check] Checking unresolved card: {card_name}")
             try:
                 card_lookup[card_name] = fetch_card_by_name(card_name)
+                print(f"    -> Individual check successful: {card_name}")
             except Exception as lookup_error:
                 card_lookup[card_name] = {
                     "error": f"Unable to fetch card data from Scryfall: {lookup_error}"
@@ -301,6 +362,7 @@ def fetch_collection_cards(deck_cards):
                     error_code=getattr(lookup_error, "code", None),
                     error_reason=getattr(lookup_error, "reason", None),
                 )
+                print(f"    -> Individual check failed: {lookup_error}")
             else:
                 write_debug_log(
                     "card_not_found_in_collection_response_recovered",
@@ -312,6 +374,12 @@ def fetch_collection_cards(deck_cards):
             print("  -> Waiting 0.5 seconds before next collection request")
             time.sleep(0.5)
 
+    write_debug_log(
+        "card_collection_completed",
+        requested_entries=total_cards,
+        resolved_entries=sum("error" not in card for card in card_lookup.values()),
+        failed_entries=sum("error" in card for card in card_lookup.values()),
+    )
     return card_lookup
 
 
@@ -321,70 +389,90 @@ def main():
     except Exception:
         pass
 
-    deck_cards = load_deck_cards()
-    formatted_cards = []
+    try:
+        deck_cards = load_deck_cards()
+        formatted_cards = []
 
-    print(f"Starting deck processing for {len(deck_cards)} cards from {DECK_FILE.name}")
-    card_lookup = fetch_collection_cards(deck_cards)
-
-    print("Building output JSON...")
-    for index, deck_entry in enumerate(deck_cards, start=1):
-        card_data = card_lookup.get(
-            deck_entry["name"],
-            {"error": f"Missing card data from Scryfall collection response for {deck_entry['name']}"},
+        write_debug_log(
+            "deck_processing_started",
+            source_file=str(DECK_FILE),
+            card_entries=len(deck_cards),
+            total_copies=sum(entry["count"] for entry in deck_cards),
         )
+        print(f"Starting deck processing for {len(deck_cards)} cards from {DECK_FILE.name}")
+        card_lookup = fetch_collection_cards(deck_cards)
 
-        card_entry_output = {
-            "count": deck_entry["count"],
-            "name": deck_entry["name"],
-            "mana_cost": None,
-            "cmc": None,
-            "type_line": None,
-            "creature_types": [],
-            "oracle_text": None,
-            "power": None,
-            "toughness": None,
-            "colors": [],
+        print("Building output JSON...")
+        for index, deck_entry in enumerate(deck_cards, start=1):
+            card_data = card_lookup.get(
+                deck_entry["name"],
+                {"error": f"Missing card data from Scryfall collection response for {deck_entry['name']}"},
+            )
+
+            card_entry_output = {
+                "count": deck_entry["count"],
+                "name": deck_entry["name"],
+                "mana_cost": None,
+                "cmc": None,
+                "type_line": None,
+                "creature_types": [],
+                "oracle_text": None,
+                "power": None,
+                "toughness": None,
+                "colors": [],
+            }
+
+            if isinstance(card_data, dict) and "error" not in card_data:
+                creature_types = card_data.get("subtypes") or []
+                if not creature_types and isinstance(card_data.get("type_line"), str):
+                    type_line = card_data["type_line"]
+                    if "Creature" in type_line and "—" in type_line:
+                        creature_types = [
+                            part.strip()
+                            for part in type_line.split("—", 1)[1].split()
+                            if part.strip()
+                        ]
+
+                card_entry_output.update(
+                    {
+                        "mana_cost": card_data.get("mana_cost"),
+                        "cmc": card_data.get("cmc"),
+                        "type_line": card_data.get("type_line"),
+                        "creature_types": creature_types,
+                        "oracle_text": card_data.get("oracle_text"),
+                        "power": card_data.get("power"),
+                        "toughness": card_data.get("toughness"),
+                        "colors": card_data.get("colors", []),
+                    }
+                )
+                print(f"[{index}/{len(deck_cards)}] Success for {deck_entry['name']}")
+            else:
+                print(f"[{index}/{len(deck_cards)}] Error for {deck_entry['name']}: {card_data.get('error', 'unknown error')}")
+
+            formatted_cards.append(card_entry_output)
+
+        result = {
+            "source_deck": DECK_FILE.name,
+            "cards": formatted_cards,
         }
 
-        if isinstance(card_data, dict) and "error" not in card_data:
-            creature_types = card_data.get("subtypes") or []
-            if not creature_types and isinstance(card_data.get("type_line"), str):
-                type_line = card_data["type_line"]
-                if "Creature" in type_line and "—" in type_line:
-                    creature_types = [
-                        part.strip()
-                        for part in type_line.split("—", 1)[1].split()
-                        if part.strip()
-                    ]
+        OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        OUTPUT_FILE.write_text(
+            json.dumps(result, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
 
-            card_entry_output.update(
-                {
-                    "mana_cost": card_data.get("mana_cost"),
-                    "cmc": card_data.get("cmc"),
-                    "type_line": card_data.get("type_line"),
-                    "creature_types": creature_types,
-                    "oracle_text": card_data.get("oracle_text"),
-                    "power": card_data.get("power"),
-                    "toughness": card_data.get("toughness"),
-                    "colors": card_data.get("colors", []),
-                }
-            )
-            print(f"[{index}/{len(deck_cards)}] Success for {deck_entry['name']}")
-        else:
-            print(f"[{index}/{len(deck_cards)}] Error for {deck_entry['name']}: {card_data.get('error', 'unknown error')}")
-
-        formatted_cards.append(card_entry_output)
-
-    result = {
-        "source_deck": DECK_FILE.name,
-        "cards": formatted_cards,
-    }
-
-    OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
-    OUTPUT_FILE.write_text(
-        json.dumps(result, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
-
-    print(f"Wrote {len(formatted_cards)} card entries to {OUTPUT_FILE.name}")
+        write_debug_log(
+            "deck_processing_completed",
+            output_file=str(OUTPUT_FILE),
+            formatted_entries=len(formatted_cards),
+            errors=sum("error" in card for card in card_lookup.values()),
+        )
+        print(f"Wrote {len(formatted_cards)} card entries to {OUTPUT_FILE.name}")
+    except Exception as error:
+        write_debug_log(
+            "deck_processing_failed",
+            error_type=type(error).__name__,
+            error_message=str(error),
+        )
+        raise
