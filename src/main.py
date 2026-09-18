@@ -392,12 +392,13 @@ def main():
     try:
         deck_cards = load_deck_cards()
         formatted_cards = []
+        total_deck_count = sum(entry["count"] for entry in deck_cards)
 
         write_debug_log(
             "deck_processing_started",
             source_file=str(DECK_FILE),
             card_entries=len(deck_cards),
-            total_copies=sum(entry["count"] for entry in deck_cards),
+            total_copies=total_deck_count,
         )
         print(f"Starting deck processing for {len(deck_cards)} cards from {DECK_FILE.name}")
         card_lookup = fetch_collection_cards(deck_cards)
@@ -453,6 +454,7 @@ def main():
 
         result = {
             "source_deck": DECK_FILE.name,
+            "total_deck_count": total_deck_count,
             "cards": formatted_cards,
         }
 
